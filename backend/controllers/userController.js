@@ -2,7 +2,8 @@ const path = require("path");
 const User = require("../models/User");
 const Tarea = require("../models/Tarea");
 const token = require("jsonwebtoken");
-const cloudinary = require("cloudinary");
+const streamifier = require("streamifier");
+const cloudinary = require("cloudinary").v2;
 // const jwt = require("jsonwebtoken");
 // const fs = require("fs");
 
@@ -41,8 +42,9 @@ const login = async (req, res) => {
 
 const register = async (req, res) => {
   const { email, password } = req.body;
-  const profilePictureUrl = req.file ? req.file.path : "sin foto";
-  const uploadedFilePublicId = req.file?.filename;
+
+  let profilePictureUrl = "sin foto";
+  let uploadedFilePublicId = null;
 
   try {
     if (!email && !password)
@@ -56,15 +58,34 @@ const register = async (req, res) => {
 
     const user = await User.findOne({ email });
     if (user) {
-      if (req.file) {
-        cloudinary.v2.uploader.destroy(uploadedFilePublicId);
-        // fs.unlinkSync(req.file.path);
-      }
       return res.status(400).json({
         succes: false,
         mensaje: "Usuario ya registrado, intente con un email diferente",
       });
     }
+
+    if (req.file) {
+      const uploadResult = await new Promise((resolve, reject) => {
+        const uploadStream = cloudinary.uploader.upload_stream(
+          {
+            folder: "perfiles",
+            allowed_formats: ["jpg", "jpeg", "png"],
+            public_id: "user_" + Date.now(), // Nombre único
+          },
+          (error, result) => {
+            if (error) reject(error);
+            else resolve(result);
+          },
+        );
+        // Enviamos el buffer (req.file.buffer) a Cloudinary
+        streamifier.createReadStream(req.file.buffer).pipe(uploadStream);
+      });
+
+      profilePictureUrl = uploadResult.secure_url;
+      uploadedFilePublicId = uploadResult.public_id; // Ej: "perfiles/user_1775966131029"
+    }
+
+    console.log(profilePictureUrl);
 
     const nuevo = new User({
       email,
@@ -84,10 +105,21 @@ const register = async (req, res) => {
       token: generarToken(nuevo._id),
     });
   } catch (err) {
-    console.log("Error aqui es: " + err.message);
-    if (req.file) {
-      cloudinary.v2.uploader.destroy(uploadedFilePublicId);
+    console.log("Error en register: " + err.message);
+
+    // Si ocurrió un error DESPUÉS de haber subido la imagen, la eliminamos de Cloudinary
+    if (uploadedFilePublicId) {
+      try {
+        await cloudinary.uploader.destroy(uploadedPublicId);
+        console.log(
+          `Imagen ${uploadedPublicId} eliminada de Cloudinary por error`,
+        );
+      } catch (cleanupError) {
+        console.error("Error limpiando imagen de Cloudinary:", cleanupError);
+      }
     }
+
+    res.status(500).json({ mensaje: "Error interno del servidor" });
   }
 };
 
@@ -101,7 +133,7 @@ const deleteAcount = async (req, res) => {
     if (user.perfilRuta !== "sin foto") {
       const urlPerfil = user.perfilRuta;
       const uploadedFilePublicId = urlPerfil.split("/");
-      cloudinary.v2.uploader.destroy(
+      cloudinary.uploader.destroy(
         `${uploadedFilePublicId[7]}/${uploadedFilePublicId[8].split(".")[0]}`,
       );
     }
